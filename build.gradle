@@ -1,0 +1,30 @@
+plugins {
+    id 'application'
+    id 'java'
+    id 'java-library'
+    id 'org.springframework.boot' version '2.3.1.RELEASE'
+    id 'io.spring.dependency-management' version '1.0.9.RELEASE'
+}
+
+repositories {
+    jcenter()
+    mavenLocal()
+}
+
+bootJar {
+    enabled = false
+}
+
+jar {
+    enabled = true
+}
+
+
+dependencies {
+    implementation 'com.redislabs:picocli-redis:2.0.1'
+    implementation 'org.apache.commons:commons-pool2'
+}
+
+application {
+    mainClassName = 'com.redislabs.lettuce.samples.App'
+}
