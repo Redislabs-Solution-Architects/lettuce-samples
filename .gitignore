@@ -1,5 +1,6 @@
 .gradle
 /build/
+/lettuce/build/
 /.idea/
 
 # Ignore Gradle GUI config

@@ -1,4 +1,4 @@
-package com.redislabs.lettuce.samples;
+package com.redislabs.samples.lettuce;
 
 import com.redislabs.picocliredis.HelpCommand;
 import io.lettuce.core.RedisClient;
@@ -28,6 +28,8 @@ public class ConnectionPooling extends HelpCommand implements Runnable {
     private App app;
     @CommandLine.Option(names = {"-t", "--threads"}, description = "Number of worker threads (default: ${DEFAULT-VALUE})", paramLabel = "<int>")
     private int threads = 5;
+    @CommandLine.Option(names = {"-i", "--iterations"}, description = "Worker iterations (default: ${DEFAULT-VALUE})", paramLabel = "<int>")
+    private int iterations = 1000;
     @CommandLine.Option(names = {"-p", "--pipeline"}, description = "#commands to run in a pipeline (default: ${DEFAULT-VALUE})", paramLabel = "<int>")
     private int pipeline = 50;
     @CommandLine.Option(names = {"-m", "--max-total"}, description = "Pool max size (default: ${DEFAULT-VALUE})", paramLabel = "<int>")
@@ -45,11 +47,11 @@ public class ConnectionPooling extends HelpCommand implements Runnable {
     public void run() {
         RedisClient client = RedisClient.create(app.getRedisURI());
         GenericObjectPoolConfig<StatefulRedisConnection<String, String>> poolConfig = poolConfig();
-        log.info("Creating connection pool using {}", poolConfig);
+        log.debug("Creating connection pool using {}", poolConfig);
         GenericObjectPool<StatefulRedisConnection<String, String>> pool = ConnectionPoolSupport.createGenericObjectPool(client::connect, poolConfig);
         ExecutorService executor = Executors.newFixedThreadPool(threads);
         for (int index = 0; index < threads; index++) {
-            executor.submit(new Worker(pool, app.getRedisURI().getTimeout().getSeconds(), index));
+            executor.submit(new Worker(pool, index));
         }
         executor.shutdown();
         try {
@@ -156,37 +158,40 @@ public class ConnectionPooling extends HelpCommand implements Runnable {
     private class Worker implements Runnable {
         private final Logger log = LoggerFactory.getLogger(Worker.class);
         private final GenericObjectPool<StatefulRedisConnection<String, String>> pool;
-        private final long timeout;
         private final int id;
+        private final long timeout;
 
-        public Worker(GenericObjectPool<StatefulRedisConnection<String, String>> pool, long commandTimeoutInSeconds, int id) {
+        public Worker(GenericObjectPool<StatefulRedisConnection<String, String>> pool, int id) {
             this.pool = pool;
-            this.timeout = commandTimeoutInSeconds;
             this.id = id;
+            this.timeout = app.getRedisURI().getTimeout().getSeconds();
         }
 
         @Override
         public void run() {
             log.info("Worker #{} running", id);
-            try (StatefulRedisConnection<String, String> connection = pool.borrowObject()) {
-                RedisAsyncCommands<String, String> commands = connection.async();
-                commands.setAutoFlushCommands(false); // disable auto-flushing
-                List<RedisFuture<?>> futures = new ArrayList<>(); // perform a series of independent calls
-                for (int index = 0; index < pipeline; index++) {
-                    futures.add(commands.set("key-" + id + "-" + index, "value-" + index));
-                }
-                commands.flushCommands(); // write all commands to the transport layer
-                for (RedisFuture<?> future : futures) {
-                    try {
-                        future.get(timeout, TimeUnit.SECONDS); // synchronization example: Wait for each future to complete
-                    } catch (Exception e) {
-                        log.error("Could not get result", e);
+            for (int iteration = 0; iteration < iterations; iteration++) {
+                log.debug("Getting connection from pool");
+                try (StatefulRedisConnection<String, String> connection = pool.borrowObject()) {
+                    RedisAsyncCommands<String, String> commands = connection.async();
+                    commands.setAutoFlushCommands(false); // disable auto-flushing
+                    List<RedisFuture<?>> futures = new ArrayList<>(); // perform a series of independent calls
+                    for (int index = 0; index < pipeline; index++) {
+                        futures.add(commands.set("key-" + id + "-" + iteration + "-" + index, "value-" + index));
                     }
+                    commands.flushCommands(); // write all commands to the transport layer
+                    for (RedisFuture<?> future : futures) {
+                        try {
+                            future.get(timeout, TimeUnit.SECONDS); // synchronization example: Wait for each future to complete
+                        } catch (Exception e) {
+                            log.error("Could not get result", e);
+                        }
+                    }
+                } catch (Exception e) {
+                    log.error("Could not get connection from pool", e);
                 }
-                log.info("Worker #{} finished executing {} commands", id, pipeline);
-            } catch (Exception e) {
-                log.error("Could not get connection from pool", e);
             }
+            log.info("Worker #{} finished", id);
         }
     }
 }

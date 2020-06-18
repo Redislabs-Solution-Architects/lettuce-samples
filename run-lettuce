@@ -2,4 +2,4 @@
 
 ./gradlew -q --console plain installDist
 
-./build/install/lettuce-samples/bin/lettuce-samples "$@"
+./lettuce/build/install/lettuce/bin/lettuce "$@"
