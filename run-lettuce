@@ -1,5 +1,0 @@
-#!/bin/sh -e
-
-./gradlew -q --console plain installDist
-
-./lettuce/build/install/lettuce/bin/lettuce "$@"

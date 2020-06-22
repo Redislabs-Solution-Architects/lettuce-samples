@@ -1,8 +1,9 @@
-package com.redislabs.samples.lettuce;
+package com.redislabs.samples;
 
 import com.redislabs.picocliredis.HelpCommand;
 import io.lettuce.core.RedisClient;
 import io.lettuce.core.RedisFuture;
+import io.lettuce.core.RedisURI;
 import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.async.RedisAsyncCommands;
 import io.lettuce.core.support.ConnectionPoolSupport;
@@ -20,12 +21,12 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 @CommandLine.Command(name = "pool", abbreviateSynopsis = true)
-public class ConnectionPooling extends HelpCommand implements Runnable {
+public class LettucePool extends HelpCommand implements Runnable {
 
-    private final Logger log = LoggerFactory.getLogger(ConnectionPooling.class);
+    private final static Logger log = LoggerFactory.getLogger(LettucePool.class);
 
-    @CommandLine.ParentCommand
-    private App app;
+    @CommandLine.Option(names = {"-r", "--redis"}, description = "Redis connection string (default: redis://localhost:6379)", paramLabel = "<uri>")
+    private RedisURI redisURI = RedisURI.create("localhost", RedisURI.DEFAULT_REDIS_PORT);
     @CommandLine.Option(names = {"-t", "--threads"}, description = "Number of worker threads (default: ${DEFAULT-VALUE})", paramLabel = "<int>")
     private int threads = 5;
     @CommandLine.Option(names = {"-i", "--iterations"}, description = "Worker iterations (default: ${DEFAULT-VALUE})", paramLabel = "<int>")
@@ -43,21 +44,25 @@ public class ConnectionPooling extends HelpCommand implements Runnable {
     @CommandLine.Option(names = {"-x", "--evict-tests"}, description = "# conns to check per eviction run (default: ${DEFAULT-VALUE})", paramLabel = "<int>")
     private int testsPerEvictionRun = BaseObjectPoolConfig.DEFAULT_NUM_TESTS_PER_EVICTION_RUN;
 
+    public static void main(String[] args) {
+        new LettucePool().run();
+    }
+
     @Override
     public void run() {
-        RedisClient client = RedisClient.create(app.getRedisURI());
+        RedisClient client = RedisClient.create(redisURI);
         GenericObjectPoolConfig<StatefulRedisConnection<String, String>> poolConfig = poolConfig();
-        log.debug("Creating connection pool using {}", poolConfig);
+        log.info("Creating connection pool: {}", poolConfig);
         GenericObjectPool<StatefulRedisConnection<String, String>> pool = ConnectionPoolSupport.createGenericObjectPool(client::connect, poolConfig);
         ExecutorService executor = Executors.newFixedThreadPool(threads);
         for (int index = 0; index < threads; index++) {
-            executor.submit(new Worker(pool, index));
+            executor.submit(new Worker(pool, redisURI.getTimeout().getSeconds(), iterations, pipeline));
         }
         executor.shutdown();
         try {
-            executor.awaitTermination(app.getRedisURI().getTimeout().getSeconds() * threads, TimeUnit.SECONDS);
+            executor.awaitTermination(redisURI.getTimeout().getSeconds() * threads, TimeUnit.SECONDS);
         } catch (InterruptedException e) {
-            log.error("Interrupted while waiting for workers to complete", e);
+            log.info("Interrupted while waiting for workers to complete", e);
         }
     }
 
@@ -155,21 +160,26 @@ public class ConnectionPooling extends HelpCommand implements Runnable {
         return config;
     }
 
-    private class Worker implements Runnable {
-        private final Logger log = LoggerFactory.getLogger(Worker.class);
-        private final GenericObjectPool<StatefulRedisConnection<String, String>> pool;
-        private final int id;
-        private final long timeout;
+    public static class Worker implements Runnable {
 
-        public Worker(GenericObjectPool<StatefulRedisConnection<String, String>> pool, int id) {
+        private static final Logger log = LoggerFactory.getLogger(Worker.class);
+
+        private final GenericObjectPool<StatefulRedisConnection<String, String>> pool;
+        private final long timeout;
+        private final int iterations;
+        private final int pipeline;
+
+        public Worker(GenericObjectPool<StatefulRedisConnection<String, String>> pool, long timeout, int iterations, int pipeline) {
             this.pool = pool;
-            this.id = id;
-            this.timeout = app.getRedisURI().getTimeout().getSeconds();
+            this.timeout = timeout;
+            this.iterations = iterations;
+            this.pipeline = pipeline;
         }
 
         @Override
         public void run() {
-            log.info("Worker #{} running", id);
+            log.info("Running {} iterations with pipeline={}", iterations, pipeline);
+            int count = 0;
             for (int iteration = 0; iteration < iterations; iteration++) {
                 log.debug("Getting connection from pool");
                 try (StatefulRedisConnection<String, String> connection = pool.borrowObject()) {
@@ -177,12 +187,13 @@ public class ConnectionPooling extends HelpCommand implements Runnable {
                     commands.setAutoFlushCommands(false); // disable auto-flushing
                     List<RedisFuture<?>> futures = new ArrayList<>(); // perform a series of independent calls
                     for (int index = 0; index < pipeline; index++) {
-                        futures.add(commands.set("key-" + id + "-" + iteration + "-" + index, "value-" + index));
+                        futures.add(commands.set("key-" + Thread.currentThread().getName() + "-" + iteration + "-" + index, "value-" + index));
                     }
                     commands.flushCommands(); // write all commands to the transport layer
                     for (RedisFuture<?> future : futures) {
                         try {
                             future.get(timeout, TimeUnit.SECONDS); // synchronization example: Wait for each future to complete
+                            count++;
                         } catch (Exception e) {
                             log.error("Could not get result", e);
                         }
@@ -191,7 +202,8 @@ public class ConnectionPooling extends HelpCommand implements Runnable {
                     log.error("Could not get connection from pool", e);
                 }
             }
-            log.info("Worker #{} finished", id);
+            log.info("Finished - Executed {} commands", count);
         }
     }
+
 }
